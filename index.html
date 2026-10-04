@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#171a1f">
+<title>PianoFlow</title>
+<style>
+:root{color-scheme:dark;--bg:#171a1f;--panel:#22262d;--line:#3a4049;--gold:#d9c7a0;--muted:#a8afb9}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:#f7f7f4;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+header{height:62px;padding:0 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);gap:12px}
+.brand{font-weight:750;letter-spacing:.2px}.brand span{color:var(--gold)}.status{font-size:12px;color:#a8dfb9;white-space:nowrap}
+main{max-width:1000px;margin:auto;padding:14px;display:flex;flex-direction:column;gap:12px}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button,.upload{border:1px solid var(--line);background:var(--panel);color:#f7f7f4;padding:12px 15px;border-radius:12px;font-size:14px;font-weight:600;cursor:pointer;min-height:44px}
+button:disabled{opacity:.35;cursor:not-allowed}.primary{background:var(--gold);color:#27241e;border-color:var(--gold)}.upload input{display:none}
+.file-name{color:var(--muted);font-size:13px;min-width:0;overflow-wrap:anywhere}
+.viewer{background:#292d34;border:1px solid var(--line);border-radius:16px;min-height:52vh;display:flex;align-items:center;justify-content:center;overflow:auto;padding:10px}
+canvas{display:block;max-width:100%;height:auto;box-shadow:0 4px 22px #0005;background:white}
+.empty{max-width:390px;text-align:center;padding:36px 20px;color:var(--muted);line-height:1.6}.empty strong{display:block;color:#f7f7f4;font-size:19px;margin-bottom:8px}
+.controls{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px}.controls button:last-child{justify-self:end}.page{font-variant-numeric:tabular-nums;text-align:center;font-size:14px;color:#e7e4dc;min-width:88px}
+.hint{color:var(--muted);font-size:12px;text-align:center;padding:2px 0 12px}
+@media(min-width:700px){main{padding:20px}.viewer{min-height:68vh;padding:18px}}
+@media(max-width:430px){header{height:56px}.toolbar button,.upload{padding:10px 11px;font-size:13px}.viewer{min-height:55vh;padding:5px}.controls button{padding:12px 9px}}
+</style>
+</head>
+<body>
+<header><div class="brand">♫ <span>Piano</span>Flow</div><div class="status" id="status">악보를 불러와 주세요</div></header>
+<main>
+  <div class="toolbar">
+    <label class="upload">PDF 악보 열기<input id="fileInput" type="file" accept="application/pdf,.pdf"></label>
+    <button id="fitButton" disabled>화면에 맞추기</button>
+    <span class="file-name" id="fileName">선택된 파일 없음</span>
+  </div>
+  <section class="viewer" id="viewer" aria-label="악보 표시 영역">
+    <div class="empty"><strong>나만의 디지털 악보대</strong>PDF 악보를 선택하면 이곳에 표시돼요.<br>아이패드에서는 가로 화면으로 사용하면 더 넓게 볼 수 있어요.</div>
+  </section>
+  <div class="controls">
+    <button id="prevButton" disabled>← 이전 페이지</button>
+    <div class="page" id="pageLabel">0 / 0</div>
+    <button class="primary" id="nextButton" disabled>다음 페이지 →</button>
+  </div>
+  <div class="hint">키보드 ← → 키로도 페이지를 넘길 수 있어요 · 현재 버전은 수동 넘김만 지원합니다</div>
+</main>
+<script type="module">
+import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
+
+const fileInput=document.querySelector("#fileInput");
+const viewer=document.querySelector("#viewer");
+const canvas=document.createElement("canvas");
+const ctx=canvas.getContext("2d");
+const prevButton=document.querySelector("#prevButton");
+const nextButton=document.querySelector("#nextButton");
+const fitButton=document.querySelector("#fitButton");
+const pageLabel=document.querySelector("#pageLabel");
+const fileName=document.querySelector("#fileName");
+const status=document.querySelector("#status");
+let pdf=null, pageNumber=1, renderTask=null, renderToken=0;
+
+function updateControls(){
+  pageLabel.textContent=pdf?`${pageNumber} / ${pdf.numPages}`:"0 / 0";
+  prevButton.disabled=!pdf||pageNumber<=1;
+  nextButton.disabled=!pdf||pageNumber>=pdf.numPages;
+  fitButton.disabled=!pdf;
+}
+async function renderPage(){
+  if(!pdf)return;
+  const token=++renderToken;
+  if(renderTask){try{renderTask.cancel()}catch{} renderTask=null;}
+  const page=await pdf.getPage(pageNumber);
+  if(token!==renderToken)return;
+  const base=page.getViewport({scale:1});
+  const availableWidth=Math.max(260,viewer.clientWidth-24);
+  const availableHeight=Math.max(320,window.innerHeight*.76);
+  const scale=Math.min(availableWidth/base.width,availableHeight/base.height,2.2);
+  const viewport=page.getViewport({scale});
+  const dpr=window.devicePixelRatio||1;
+  canvas.width=Math.floor(viewport.width*dpr);
+  canvas.height=Math.floor(viewport.height*dpr);
+  canvas.style.width=`${Math.floor(viewport.width)}px`;
+  canvas.style.height=`${Math.floor(viewport.height)}px`;
+  viewer.replaceChildren(canvas);
+  renderTask=page.render({canvasContext:ctx,viewport,transform:dpr!==1?[dpr,0,0,dpr,0,0]:null});
+  try{await renderTask.promise;if(token===renderToken)status.textContent="악보 표시 중"}
+  catch(error){if(error?.name!=="RenderingCancelledException")status.textContent="페이지 표시 중 오류가 발생했어요"}
+  updateControls();
+}
+fileInput.addEventListener("change",async(event)=>{
+  const file=event.target.files?.[0]; if(!file)return;
+  if(file.type!=="application/pdf"&&!file.name.toLowerCase().endsWith(".pdf")){
+    status.textContent="PDF 파일을 선택해 주세요";return;
+  }
+  status.textContent="PDF를 여는 중…";
+  try{
+    const bytes=await file.arrayBuffer();
+    const loaded=await pdfjsLib.getDocument({data:new Uint8Array(bytes)}).promise;
+    pdf=loaded;pageNumber=1;fileName.textContent=file.name;
+    updateControls();await renderPage();
+  }catch(error){console.error(error);status.textContent="파일을 열지 못했어요. 암호화되지 않은 PDF인지 확인해 주세요";}
+});
+prevButton.addEventListener("click",()=>{if(pdf&&pageNumber>1){pageNumber--;renderPage()}});
+nextButton.addEventListener("click",()=>{if(pdf&&pageNumber<pdf.numPages){pageNumber++;renderPage()}});
+fitButton.addEventListener("click",renderPage);
+window.addEventListener("keydown",(event)=>{
+  if(event.key==="ArrowRight"&&pdf&&pageNumber<pdf.numPages){pageNumber++;renderPage()}
+  if(event.key==="ArrowLeft"&&pdf&&pageNumber>1){pageNumber--;renderPage()}
+});
+let resizeTimer;
+window.addEventListener("resize",()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(renderPage,160)});
+updateControls();
+</script>
+</body>
+</html>
