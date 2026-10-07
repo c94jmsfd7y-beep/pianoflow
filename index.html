@@ -230,6 +230,7 @@
   });
 
   // ---------- Basic monophonic pitch detector ----------
+  // iPad에서 너무 무거워지지 않도록 계산량을 줄인 버전입니다.
   const micButton = document.getElementById("micButton");
   const noteValue = document.getElementById("noteValue");
   const freqValue = document.getElementById("freqValue");
@@ -242,6 +243,8 @@
   let pitchRunning = false;
   let animationId = null;
   let buffer = null;
+  let workBuffer = null;
+  let lastDetectTime = 0;
 
   const noteNames = ["C", "C♯", "D", "D♯", "E", "F",
                      "F♯", "G", "G♯", "A", "A♯", "B"];
@@ -257,76 +260,110 @@
   }
 
   function detectPitch(data, sampleRate) {
-    // Remove DC offset.
+    // 4배로 다운샘플링해서 iPad에서도 가볍게 계산합니다.
+    const decimation = 4;
+    const n = Math.floor(data.length / decimation);
+    if (n < 256) return null;
+
     let mean = 0;
-    for (let i = 0; i < data.length; i++) mean += data[i];
-    mean /= data.length;
+    for (let i = 0; i < n; i++) mean += data[i * decimation];
+    mean /= n;
 
     let rms = 0;
-    for (let i = 0; i < data.length; i++) {
-      const v = data[i] - mean;
-      data[i] = v;
+    for (let i = 0; i < n; i++) {
+      const v = data[i * decimation] - mean;
+      workBuffer[i] = v;
       rms += v * v;
     }
-    rms = Math.sqrt(rms / data.length);
+    rms = Math.sqrt(rms / n);
 
-    // Ignore near-silence.
-    if (rms < 0.008) return null;
+    if (rms < 0.012) return { silent: true, rms };
 
-    let bestOffset = -1;
-    let bestCorrelation = 0;
+    const sr = sampleRate / decimation;
     const minFreq = 60;
     const maxFreq = 1000;
-    const minLag = Math.floor(sampleRate / maxFreq);
-    const maxLag = Math.min(Math.floor(sampleRate / minFreq), data.length - 1);
+    const minLag = Math.floor(sr / maxFreq);
+    const maxLag = Math.min(Math.floor(sr / minFreq), n - 2);
+
+    let bestLag = -1;
+    let bestCorr = 0;
 
     for (let lag = minLag; lag <= maxLag; lag++) {
       let sum = 0;
       let normA = 0;
       let normB = 0;
-      const limit = data.length - lag;
+      const limit = n - lag;
 
       for (let i = 0; i < limit; i++) {
-        const a = data[i];
-        const b = data[i + lag];
+        const a = workBuffer[i];
+        const b = workBuffer[i + lag];
         sum += a * b;
         normA += a * a;
         normB += b * b;
       }
 
       const corr = sum / Math.sqrt((normA * normB) || 1);
-      if (corr > bestCorrelation) {
-        bestCorrelation = corr;
-        bestOffset = lag;
+      if (corr > bestCorr) {
+        bestCorr = corr;
+        bestLag = lag;
       }
     }
 
-    if (bestOffset < 0 || bestCorrelation < 0.35) return null;
+    if (bestLag < 0 || bestCorr < 0.30) return null;
 
-    const freq = sampleRate / bestOffset;
-    if (freq < 60 || freq > 1000) return null;
+    // 주변 lag를 이용해 주파수를 조금 보정합니다.
+    let refinedLag = bestLag;
+    if (bestLag > minLag && bestLag < maxLag) {
+      const corrAt = (lag) => {
+        let sum = 0, normA = 0, normB = 0;
+        const limit = n - lag;
+        for (let i = 0; i < limit; i++) {
+          const a = workBuffer[i], b = workBuffer[i + lag];
+          sum += a * b; normA += a * a; normB += b * b;
+        }
+        return sum / Math.sqrt((normA * normB) || 1);
+      };
+      const y1 = corrAt(bestLag - 1);
+      const y2 = bestCorr;
+      const y3 = corrAt(bestLag + 1);
+      const denom = 2 * (y1 - 2 * y2 + y3);
+      if (Math.abs(denom) > 1e-6) {
+        refinedLag += (y1 - y3) / denom;
+      }
+    }
 
-    return { freq, correlation: bestCorrelation };
+    const freq = sr / refinedLag;
+    if (freq < minFreq || freq > maxFreq) return null;
+    return { freq, correlation: bestCorr, rms };
   }
 
-  function pitchLoop() {
+  function pitchLoop(now) {
     if (!pitchRunning) return;
 
     analyser.getFloatTimeDomainData(buffer);
-    const result = detectPitch(buffer, audioContext.sampleRate);
 
-    if (result) {
-      const info = frequencyToNote(result.freq);
-      if (info) {
-        noteValue.textContent = info.note;
-        freqValue.textContent = `${result.freq.toFixed(1)} Hz`;
-        micStatus.textContent =
-          `감지 중 · 신뢰도 ${(result.correlation * 100).toFixed(0)}%`;
+    // 너무 자주 무거운 계산을 하지 않도록 약 12회/초로 제한합니다.
+    if (now - lastDetectTime >= 80) {
+      lastDetectTime = now;
+      const result = detectPitch(buffer, audioContext.sampleRate);
+
+      if (result?.silent) {
+        noteValue.textContent = "—";
+        freqValue.textContent = "— Hz";
+        micStatus.textContent = "마이크는 작동 중 · 소리를 기다리는 중…";
+      } else if (result) {
+        const info = frequencyToNote(result.freq);
+        if (info) {
+          noteValue.textContent = info.note;
+          freqValue.textContent = `${result.freq.toFixed(1)} Hz`;
+          micStatus.textContent =
+            `감지 중 · 신뢰도 ${(result.correlation * 100).toFixed(0)}%`;
+        }
+      } else {
+        noteValue.textContent = "—";
+        freqValue.textContent = "— Hz";
+        micStatus.textContent = "마이크는 작동 중 · 피아노에서 한 음을 길게 눌러보세요.";
       }
-    } else {
-      noteValue.textContent = "—";
-      freqValue.textContent = "— Hz";
-      micStatus.textContent = "소리를 기다리는 중…";
     }
 
     animationId = requestAnimationFrame(pitchLoop);
@@ -354,12 +391,14 @@
     analyser.smoothingTimeConstant = 0;
 
     buffer = new Float32Array(analyser.fftSize);
+    workBuffer = new Float32Array(Math.floor(analyser.fftSize / 4));
     micSource.connect(analyser);
 
     pitchRunning = true;
+    lastDetectTime = 0;
     micButton.textContent = "⏹ 마이크 중지";
-    micStatus.textContent = "마이크가 켜졌습니다. 피아노에서 한 음을 눌러보세요.";
-    pitchLoop();
+    micStatus.textContent = "마이크가 켜졌습니다. 피아노에서 한 음을 길게 눌러보세요.";
+    pitchLoop(performance.now());
   }
 
   function stopMic() {
