@@ -123,6 +123,7 @@
       </div>
       <div class="value">
         <div class="label">주파수</div>
+        <div id="levelValue" style="margin-top:10px;color:#aaa;font-size:13px">마이크 입력: —</div>
         <div id="freqValue" class="big">— Hz</div>
       </div>
     </div>
@@ -245,6 +246,7 @@
   let buffer = null;
   let workBuffer = null;
   let lastDetectTime = 0;
+  const levelValue = document.getElementById("levelValue");
 
   const noteNames = ["C", "C♯", "D", "D♯", "E", "F",
                      "F♯", "G", "G♯", "A", "A♯", "B"];
@@ -277,7 +279,8 @@
     }
     rms = Math.sqrt(rms / n);
 
-    if (rms < 0.012) return { silent: true, rms };
+    levelValue.textContent = `마이크 입력: ${(rms * 100).toFixed(1)}%`;
+    if (rms < 0.004) return { silent: true, rms };
 
     const sr = sampleRate / decimation;
     const minFreq = 60;
@@ -309,7 +312,7 @@
       }
     }
 
-    if (bestLag < 0 || bestCorr < 0.30) return null;
+    if (bestLag < 0 || bestCorr < 0.18) return null;
 
     // 주변 lag를 이용해 주파수를 조금 보정합니다.
     let refinedLag = bestLag;
@@ -418,6 +421,7 @@
     micButton.textContent = "🎤 마이크 시작";
     micStatus.textContent = "마이크가 꺼졌습니다.";
     noteValue.textContent = "—";
+    levelValue.textContent = "마이크 입력: —";
     freqValue.textContent = "— Hz";
   }
 
